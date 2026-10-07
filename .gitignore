@@ -1,0 +1,57 @@
+# ======================
+# MounRiver Studio / GCC 构建产物
+# ======================
+# obj/ 整个目录均为 IDE 自动生成（makefile、subdir.mk、*.o、*.d、*.elf 等）
+/obj/
+
+# 编译输出（防止散落在工程其他目录）
+*.o
+*.d
+*.crf
+*.bin
+*.hex
+*.elf
+*.map
+*.lst
+*.siz
+*.lnp
+*.bak
+*.dep
+*.iex
+
+# 链接/构建临时文件
+Debug/Release/
+Listings/
+Objects/
+
+# ======================
+# Eclipse / MounRiver Studio 本地工作区配置
+# 注：.project / .cproject / .template / *.launch / *.wvproj 属于工程共享配置，保留
+# ======================
+.metadata/
+.settings/
+*.launch.tmp
+RemoteSystemsTempFiles/
+.loader-settings/
+
+# ======================
+# 系统与编辑器杂项
+# ======================
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+
+# 编辑器 / 临时文件
+.vscode/
+.idea/
+*~
+*.swp
+*.swo
+*.tmp
+*.log
