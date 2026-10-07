@@ -67,8 +67,10 @@ void GetAcce(uint32_t i, _iq * accex, _iq * accey)
 {
     int16_t x,y,z;
     LIS2DH_Get(&x,&y,&z);
-    float xp = (float) y * -0.3f;
-    float yp = (float) x * 0.3f;
+    // 传感器轴 -> 仿真轴映射（仿真坐标：x向右，y向下）
+    // 实测校准：两轴符号与初版推导均相反，最终映射 (xp,yp) = (+x,-y)
+    float xp = (float) x * 0.3f;
+    float yp = (float) y * -0.3f;
 
     *accex = _IQ(xp);
     *accey = _IQ(yp);

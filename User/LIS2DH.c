@@ -6,7 +6,7 @@
 #define SDA_HIGH GPIO_SetBits(GPIOA,GPIO_Pin_7)
 #define SCL_LOW GPIO_ResetBits(GPIOA,GPIO_Pin_5)
 #define SCL_HIGH GPIO_SetBits(GPIOA,GPIO_Pin_5)
-#define Read_SDI (GPIO_ReadInputDataBit(GPIOA，GPIO_Pin_6) == BIT_SET ? 1 : 0)
+#define Read_SDI (GPIO_ReadInputDataBit(GPIOA,GPIO_Pin_6) == BIT_SET ? 1 : 0)
 
 static uint8_t SPI_readwrite(uint8_t data)
 {
