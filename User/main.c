@@ -143,18 +143,50 @@ int main(void)
 
 
     uint32_t timer = 0;
+    // 节电功能：静止超过15秒关闭LED显示，检测到姿态变化后重新点亮
+    _iq last_accex = accex;
+    _iq last_accey = accey;
+    uint32_t last_motion_time = SysTick->CNT;
+    uint8_t display_off = 0;
+    const _iq motion_threshold = _IQ(0.8f);   // 姿态变化判定阈值(m/s^2)
+    const uint32_t stillness_timeout = (15U * SystemCoreClock) / 8U; // 15秒对应的SysTick tick数
     while(1)
     {   
         NVIC_DisableIRQ(TIM1_CC_IRQn);
         NVIC_DisableIRQ(TIM1_UP_IRQn);
         GetAcce(7000,&accex,&accey);
-        ParticleIntegrate(accex, accey);
-        PushParticlesApart(PUSH_ITER);
-        particles_to_grid();
-        density_update();
-        compute_grid_forces(GRID_ITER);
-        grid_to_particles();
-        Show();
+
+        // 节电：检测姿态是否变化
+        _iq dx = accex - last_accex;
+        _iq dy = accey - last_accey;
+        if (dx < 0) dx = -dx;
+        if (dy < 0) dy = -dy;
+        if (dx > motion_threshold || dy > motion_threshold) {
+            last_motion_time = SysTick->CNT;
+            if (display_off) {
+                LED_Show();
+                display_off = 0;
+            }
+        }
+        last_accex = accex;
+        last_accey = accey;
+
+        // 静止超过15秒则关闭显示
+        if (!display_off && (SysTick->CNT - last_motion_time) > stillness_timeout) {
+            LED_Stop();
+            display_off = 1;
+        }
+
+        // 显示关闭时跳过仿真以省电
+        if (!display_off) {
+            ParticleIntegrate(accex, accey);
+            PushParticlesApart(PUSH_ITER);
+            particles_to_grid();
+            density_update();
+            compute_grid_forces(GRID_ITER);
+            grid_to_particles();
+            Show();
+        }
         NVIC_EnableIRQ(TIM1_CC_IRQn);
         NVIC_EnableIRQ(TIM1_UP_IRQn);
         while(timer ++ < 330)

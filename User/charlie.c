@@ -186,6 +186,25 @@ void LED_Show(void)
     ledRunning = 1;
 }
 
+// 关闭显示，停掉DMA刷新并熄灭所有LED；保留TIM1运行作为WFI唤醒节拍
+void LED_Stop(void)
+{
+    if(!ledRunning)
+    {
+        return;
+    }
+
+    DMA_Cmd(DMA1_Channel5, DISABLE);
+    DMA_Cmd(DMA1_Channel2, DISABLE);
+    DMA_Cmd(DMA1_Channel3, DISABLE);
+    DMA_Cmd(DMA1_Channel6, DISABLE);
+
+    // 熄灭所有LED（BSHR高16位写1复位OUTDR对应位）
+    GPIOB->BSHR = 0xFFFF0000;
+
+    ledRunning = 0;
+}
+
 //
 
 
