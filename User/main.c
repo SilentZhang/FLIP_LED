@@ -56,10 +56,45 @@ void shutdown(void){
 
     GPIO_PinRemapConfig(GPIO_Remap_SWJ_Disable,ENABLE);
     LIS2DH_Deinit();
-    GPIOallPU();
+
+    // 关闭LED刷新定时器，避免其挂起中断导致STOP被立即唤醒
+    TIM_Cmd(TIM1, DISABLE);
+    TIM_ClearITPendingBit(TIM1, TIM_IT_Update | TIM_IT_CC1 | TIM_IT_CC2 | TIM_IT_CC3);
+
+    GPIOallPU();  // PA0此时为内部上拉输入，与按键(按下接GND)匹配
+
+    // 配置PA0(按键WK，按下为下降沿)为EXTI线0中断，作为STOP唤醒源
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
+    GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource0);
+    EXTI_ClearITPendingBit(EXTI_Line0);
+
+    EXTI_InitTypeDef extiCfg = {0};
+    extiCfg.EXTI_Line = EXTI_Line0;
+    extiCfg.EXTI_Mode = EXTI_Mode_Interrupt;
+    extiCfg.EXTI_Trigger = EXTI_Trigger_Falling;
+    extiCfg.EXTI_LineCmd = ENABLE;
+    EXTI_Init(&extiCfg);
+
+    NVIC_InitTypeDef nvicCfg = {0};
+    nvicCfg.NVIC_IRQChannel = EXTI0_IRQn;
+    nvicCfg.NVIC_IRQChannelPreemptionPriority = 1;
+    nvicCfg.NVIC_IRQChannelSubPriority = 0;
+    nvicCfg.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&nvicCfg);
+
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR,ENABLE);
     PWR_EnterSTOPMode(PWR_Regulator_LowPower,PWR_STOPEntry_WFI);
     NVIC_SystemReset();
+}
+
+// STOP模式下PA0按键下降沿唤醒中断：仅清挂起标志，唤醒后由shutdown()复位重启
+void EXTI0_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void EXTI0_IRQHandler(void)
+{
+    if(EXTI_GetITStatus(EXTI_Line0) != RESET)
+    {
+        EXTI_ClearITPendingBit(EXTI_Line0);
+    }
 }
 
 
