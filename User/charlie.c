@@ -202,6 +202,9 @@ void LED_Stop(void)
     // 熄灭所有LED（BSHR高16位写1复位OUTDR对应位）
     GPIOB->BSHR = 0xFFFF0000;
 
+    // 清除挂起的TIM1 DMA请求标志，防止重新使能时响应旧事件
+    TIM_ClearITPendingBit(TIM1, TIM_IT_Update | TIM_IT_CC1 | TIM_IT_CC2 | TIM_IT_CC3);
+
     ledRunning = 0;
 }
 

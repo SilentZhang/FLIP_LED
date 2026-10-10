@@ -146,10 +146,10 @@ int main(void)
     // 节电功能：静止超过15秒关闭LED显示，检测到姿态变化后重新点亮
     _iq last_accex = accex;
     _iq last_accey = accey;
-    uint32_t last_motion_time = SysTick->CNT;
+    uint16_t stillness_frames = 0;  // 帧计数器，每帧约11ms，15秒=1364帧
     uint8_t display_off = 0;
     const _iq motion_threshold = _IQ(0.8f);   // 姿态变化判定阈值(m/s^2)
-    const uint32_t stillness_timeout = (15U * SystemCoreClock) / 8U; // 15秒对应的SysTick tick数
+    const uint16_t stillness_timeout_frames = 1364U; // 15秒对应的帧数
     while(1)
     {   
         NVIC_DisableIRQ(TIM1_CC_IRQn);
@@ -162,7 +162,7 @@ int main(void)
         if (dx < 0) dx = -dx;
         if (dy < 0) dy = -dy;
         if (dx > motion_threshold || dy > motion_threshold) {
-            last_motion_time = SysTick->CNT;
+            stillness_frames = 0;
             if (display_off) {
                 LED_Show();
                 display_off = 0;
@@ -172,9 +172,13 @@ int main(void)
         last_accey = accey;
 
         // 静止超过15秒则关闭显示
-        if (!display_off && (SysTick->CNT - last_motion_time) > stillness_timeout) {
-            LED_Stop();
-            display_off = 1;
+        if (!display_off) {
+            if (stillness_frames < stillness_timeout_frames) {
+                stillness_frames++;
+            } else {
+                LED_Stop();
+                display_off = 1;
+            }
         }
 
         // 显示关闭时跳过仿真以省电
