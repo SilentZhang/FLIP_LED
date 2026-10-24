@@ -24,6 +24,20 @@ static _iq solidMask[CellCount];
 static uint8_t cellType[CellCount];
 static _iq particleRestDensity = 0;
 
+// 心形内部区域（红色格，从图上按 15 列 x 16 行提取），每行 bit14..bit0 对应 x=1..15
+static const uint16_t heartInterior[16] = {
+    0x0000, 0x0000, 0x0C18, 0x1E3C, 0x3F7E, 0x7FFF, 0x7FFF, 0x7FFF,
+    0x3FFE, 0x1FFC, 0x0FF8, 0x07F0, 0x03E0, 0x01C0, 0x0080, 0x0000
+};
+
+// 心形墙壁（蓝色格），用于点亮轮廓
+static const uint16_t heartWall[16] = {
+    0x0000, 0x1E3C, 0x3266, 0x61C3, 0x4081, 0x0000, 0x0000, 0x0000,
+    0x4001, 0x6003, 0x3006, 0x180C, 0x0C18, 0x0630, 0x0360, 0x01C0
+};
+
+static uint8_t wallMode = WALL_RECT;
+
 static _iq minX = Spacing + ParticleRadius;
 static _iq minY = Spacing + ParticleRadius;
 static _iq maxX;
@@ -34,7 +48,34 @@ static _iq maxY;
 static uint8_t cellParticleCountPrefix[CellPrefixCountSize];
 static uint8_t particlePosId[NumberOfParticles];
 
+// 当前参与仿真的粒子数：心形容器容积小，用一半粒子以获得可见的液面
+static unsigned int activeParticles = NumberOfParticles;
+
 void printLocation(unsigned int n);
+
+// 该网格是否可容纳流体（非墙壁）
+static uint8_t is_fluid_cell(unsigned int x, unsigned int y)
+{
+    if (x < 1U || x > CellNumX - 2U || y < 1U || y > CellNumY - 2U) {
+        return 0U;
+    }
+    if (wallMode == WALL_HEART) {
+        return (uint8_t)((heartInterior[y - 1U] >> (15U - x)) & 1U);
+    }
+    return 1U;
+}
+
+// 该网格是否是需要点亮的墙壁（心形蓝色轮廓）
+static uint8_t is_visible_wall(unsigned int x, unsigned int y)
+{
+    if (wallMode != WALL_HEART) {
+        return 0U;
+    }
+    if (x < 1U || x > CellNumX - 2U || y < 1U || y > CellNumY - 2U) {
+        return 0U;
+    }
+    return (uint8_t)((heartWall[y - 1U] >> (15U - x)) & 1U);
+}
 
 static int clamp_index(int value, int min_value, int max_value) {
     if (value < min_value) {
@@ -56,14 +97,19 @@ static _iq clampf_local(_iq value, _iq min_value, _iq max_value) {
     return value;
 }
 
+// 简易线性同余随机数，返回 [0,1)，用于粒子初始位置抖动
+static uint32_t rngState = 12345U;
+
+static _iq rand_unit(void)
+{
+    rngState = rngState * 1664525U + 1013904223U;
+    return _IQ((float)(rngState >> 8) / 16777216.0f);
+}
+
 static void setup_solid_mask(void) {
     for (unsigned int x = 0; x < CellNumX; x++) {
         for (unsigned int y = 0; y < CellNumY; y++) {
-            _iq s = _IQ(1);
-            if (x == 0U || x == CellNumX - 1U || y == 0U || y == CellNumY - 1U) {
-                s = _IQ(0.0);
-            }
-            solidMask[INDEX(x, y)] = s;
+            solidMask[INDEX(x, y)] = is_fluid_cell(x, y) ? _IQ(1.0) : _IQ(0.0);
         }
     }
 }
@@ -83,23 +129,29 @@ void InitParticles() {
 
     const _iq h = Spacing;
     const _iq r = ParticleRadius;
-    const _iq dx = _IQmpy(_IQ(2.0), r);
-    const _iq dy = _IQmpy(_IQ(0.86602540378), dx);
     invertSpacing = _IQdiv(_IQ(1.0), Spacing);
     maxX = _IQmpy(_IQ(CellNumX - 1U), Spacing) - ParticleRadius;
     maxY = _IQmpy(_IQ(CellNumY - 1U), Spacing) - ParticleRadius;
 
+    const _iq half = _IQ(0.5);
+    const _iq jitter = _IQmpy(Spacing, _IQ(0.3));
     unsigned int p_num = 0;
-    for (unsigned int i = 0; i < CellNumX && p_num < NumberOfParticles; i++) {
-        for (unsigned int j = 0; j < CellNumY && p_num < NumberOfParticles; j++) {
-            _iq px = h + r + _IQmpy(dx, _IQ(i)) + ((j % 2U == 0U) ? _IQ(0.0) : r);
-            _iq py = h + r + _IQmpy(dy, _IQ(j));
-            if (px > _IQmpy(_IQ(CellNumX - 1U), h) - r || py > _IQmpy(_IQ(CellNumY - 1U), h) - r) {
-                continue;
+
+    // 自下而上逐格布置，保证静止时流体堆在容器底部
+    for (unsigned int pass = 0; pass < 2U && p_num < activeParticles; pass++) {
+        for (int y = (int)CellNumY - 2; y >= 1 && p_num < activeParticles; y--) {
+            for (int x = 1; x <= (int)CellNumX - 2 && p_num < activeParticles; x++) {
+                if (!is_fluid_cell((unsigned int)x, (unsigned int)y)) {
+                    continue;
+                }
+                _iq px = _IQmpy(_IQ(x) + half, h);
+                _iq py = _IQmpy(_IQ(y) + half, h);
+                _iq ox = _IQmpy(jitter, _IQmpy(_IQ(2.0), rand_unit()) - _IQ(1.0));
+                _iq oy = _IQmpy(jitter, _IQmpy(_IQ(2.0), rand_unit()) - _IQ(1.0));
+                particlePos[XID(p_num)] = px + ox;
+                particlePos[YID(p_num)] = py + oy;
+                p_num++;
             }
-            particlePos[XID(p_num)] = px;
-            particlePos[YID(p_num)] = py;
-            p_num++;
         }
     }
 
@@ -109,10 +161,68 @@ void InitParticles() {
     }
 }
 
+void SandSim_SetWallMode(uint8_t mode)
+{
+    if ((mode == WALL_HEART) == (wallMode == WALL_HEART)) {
+        return;
+    }
+    wallMode = (mode == WALL_HEART) ? WALL_HEART : WALL_RECT;
+    // 心形容积约为矩形的一半，减少粒子数以留出可见液面
+    activeParticles = (wallMode == WALL_HEART) ? 64U : NumberOfParticles;
+    // 容器改变后重新布置粒子，避免粒子被留在新墙壁内部
+    InitParticles();
+}
+
+// 粒子若进入墙壁网格，则移动到最近的流体网格中心并清空速度
+static void ConstrainParticlesToFluid(void)
+{
+    const _iq half = _IQ(0.5);
+
+    for (unsigned int i = 0; i < activeParticles; i++) {
+        _iq px = particlePos[XID(i)];
+        _iq py = particlePos[YID(i)];
+        int xi = clamp_index(_IQint(_IQmpy(px, invertSpacing)), 0, (int)CellNumX - 1);
+        int yi = clamp_index(_IQint(_IQmpy(py, invertSpacing)), 0, (int)CellNumY - 1);
+        if (is_fluid_cell((unsigned int)xi, (unsigned int)yi)) {
+            continue;
+        }
+
+        int bestX = -1;
+        int bestY = -1;
+        _iq bestD2 = 0;
+        for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                int nx = xi + dx;
+                int ny = yi + dy;
+                if (!is_fluid_cell((unsigned int)nx, (unsigned int)ny)) {
+                    continue;
+                }
+                _iq cx = _IQmpy(_IQ(nx) + half, Spacing);
+                _iq cy = _IQmpy(_IQ(ny) + half, Spacing);
+                _iq ddx = cx - px;
+                _iq ddy = cy - py;
+                _iq d2 = _IQmpy(ddx, ddx) + _IQmpy(ddy, ddy);
+                if (bestX < 0 || d2 < bestD2) {
+                    bestD2 = d2;
+                    bestX = nx;
+                    bestY = ny;
+                }
+            }
+        }
+
+        if (bestX >= 0) {
+            particlePos[XID(i)] = _IQmpy(_IQ(bestX) + half, Spacing);
+            particlePos[YID(i)] = _IQmpy(_IQ(bestY) + half, Spacing);
+            particleVel[XID(i)] = _IQ(0.0);
+            particleVel[YID(i)] = _IQ(0.0);
+        }
+    }
+}
+
 void ParticleIntegrate(_iq xAcceleration, _iq yAcceleration) {
 
 
-    for (unsigned int i = 0; i < NumberOfParticles; i++) {
+    for (unsigned int i = 0; i < activeParticles; i++) {
         particleVel[XID(i)] += _IQmpy(xAcceleration, dt);
         particleVel[YID(i)] += _IQmpy(yAcceleration, dt);
         particlePos[XID(i)] += _IQmpy(particleVel[XID(i)], dt);
@@ -141,13 +251,15 @@ void ParticleIntegrate(_iq xAcceleration, _iq yAcceleration) {
         particlePos[XID(i)] = x;
         particlePos[YID(i)] = y;
     }
+
+    ConstrainParticlesToFluid();
 }
 
 void PushParticlesApart(unsigned int nIters) {
     memset(cellParticleCountPrefix, 0, sizeof(cellParticleCountPrefix));
     memset(particlePosId, 0, sizeof(particlePosId));
 
-    for (unsigned int i = 0; i < NumberOfParticles; i++) {
+    for (unsigned int i = 0; i < activeParticles; i++) {
         unsigned int xi = (unsigned int)clamp_index(_IQint(_IQmpy(particlePos[XID(i)], invertSpacing)), 0, (int)CellNumX - 1);
         unsigned int yi = (unsigned int)clamp_index(_IQint(_IQmpy(particlePos[YID(i)], invertSpacing)), 0, (int)CellNumY - 1);
         cellParticleCountPrefix[INDEX(xi, yi)]++;
@@ -160,7 +272,7 @@ void PushParticlesApart(unsigned int nIters) {
     }
     cellParticleCountPrefix[CellCount] = prefix;
 
-    for (unsigned int i = 0; i < NumberOfParticles; i++) {
+    for (unsigned int i = 0; i < activeParticles; i++) {
         unsigned int xi = (unsigned int)clamp_index(_IQint(_IQmpy(particlePos[XID(i)], invertSpacing)), 0, (int)CellNumX - 1);
         unsigned int yi = (unsigned int)clamp_index(_IQint(_IQmpy(particlePos[YID(i)], invertSpacing)), 0, (int)CellNumY - 1);
         unsigned int cellNr = INDEX(xi, yi);
@@ -172,7 +284,7 @@ void PushParticlesApart(unsigned int nIters) {
     const _iq minDist2 = _IQmpy(minDist, minDist);
 
     for (unsigned int iter = 0; iter < nIters; iter++) {
-        for (unsigned int i = 0; i < NumberOfParticles; i++) {
+        for (unsigned int i = 0; i < activeParticles; i++) {
             _iq px = particlePos[XID(i)];
             _iq py = particlePos[YID(i)];
 
@@ -216,7 +328,7 @@ void PushParticlesApart(unsigned int nIters) {
             }
         }
     }
-    for (unsigned int i = 0; i < NumberOfParticles; i++) {
+    for (unsigned int i = 0; i < activeParticles; i++) {
         _iq x = particlePos[XID(i)];
         _iq y = particlePos[YID(i)];
 
@@ -240,6 +352,8 @@ void PushParticlesApart(unsigned int nIters) {
         particlePos[XID(i)] = x;
         particlePos[YID(i)] = y;
     }
+
+    ConstrainParticlesToFluid();
 }
 
 void density_update(void) {
@@ -249,7 +363,7 @@ void density_update(void) {
     const _iq h1 = invertSpacing;
     const _iq h2 = _IQmpy(_IQ(0.5), h);
 
-    for (unsigned int i = 0; i < NumberOfParticles; i++) {
+    for (unsigned int i = 0; i < activeParticles; i++) {
         _iq x = clampf_local(particlePos[XID(i)], h, _IQmpy(_IQ(CellNumX - 1U), h));
         _iq y = clampf_local(particlePos[YID(i)], h, _IQmpy(_IQ(CellNumY - 1U), h));
 
@@ -299,7 +413,7 @@ void particles_to_grid(void) {
         cellType[i] = (solidMask[i] == _IQ(0.0)) ? SOLID_CELL : AIR_CELL;
     }
 
-    for (unsigned int i = 0; i < NumberOfParticles; i++) {
+    for (unsigned int i = 0; i < activeParticles; i++) {
         int xi = clamp_index(_IQint(_IQmpy(particlePos[XID(i)], invertSpacing)), 0, (int)CellNumX - 1);
         int yi = clamp_index(_IQint(_IQmpy(particlePos[YID(i)], invertSpacing)), 0, (int)CellNumY - 1);
         unsigned int cellNr = INDEX((unsigned int)xi, (unsigned int)yi);
@@ -317,7 +431,7 @@ void particles_to_grid(void) {
         _iq *f = (component == 0) ? uVel : vVel;
         _iq *w = (component == 0) ? uWeight : vWeight;
 
-        for (unsigned int i = 0; i < NumberOfParticles; i++) {
+        for (unsigned int i = 0; i < activeParticles; i++) {
             _iq x = clampf_local(particlePos[XID(i)], h, _IQmpy(_IQ(CellNumX - 1U), h));
             _iq y = clampf_local(particlePos[YID(i)], h, _IQmpy(_IQ(CellNumY - 1U), h));
 
@@ -443,7 +557,7 @@ void grid_to_particles(void) {
         _iq *prevF = (component == 0) ? uPrev : vPrev;
         int offset = (component == 0) ? (int)CellNumY : 1;
 
-        for (unsigned int i = 0; i < NumberOfParticles; i++) {
+        for (unsigned int i = 0; i < activeParticles; i++) {
             _iq x = clampf_local(particlePos[XID(i)], h, _IQmpy(_IQ(CellNumX - 1U), h));
             _iq y = clampf_local(particlePos[YID(i)], h, _IQmpy(_IQ(CellNumY - 1U), h));
 
@@ -488,25 +602,18 @@ void grid_to_particles(void) {
 }
 
 void screen_update() {
-    //显示
-    
-    // 根据网格类型直接显示
+    // 显示：有粒子的网格点亮；墙壁只点亮心形蓝色轮廓，背景保持熄灭
     for (int y = 1; y < CellNumY-1; y++) {
         for (int x = 1; x < CellNumX-1; x++) {
-            uint32_t cell = cellType[INDEX(x, y)];
-            x--;
-            y--;
+            uint8_t cell = cellType[INDEX(x, y)];
+            uint8_t on = 0U;
             if (cell == FLUID_CELL) {
-                LED_SetPixel(x*16+y,LEDON);
-            } else if (cell == SOLID_CELL) {
-                LED_SetPixel(x*16+y,LEDON);
-            } else {
-                LED_SetPixel(x*16+y,LEDOFF);
+                on = 1U;
+            } else if (cell == SOLID_CELL && is_visible_wall((unsigned int)x, (unsigned int)y)) {
+                on = 1U;
             }
-            x++;
-            y++;
-            
+            LED_SetPixel((uint16_t)((x-1)*16 + (y-1)), on ? LEDON : LEDOFF);
         }
-    }    
+    }
 }
 

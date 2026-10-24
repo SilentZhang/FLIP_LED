@@ -98,7 +98,7 @@ void EXTI0_IRQHandler(void)
 }
 
 
-void GetAcce(uint32_t i, _iq * accex, _iq * accey)
+void GetAcce(uint32_t i, _iq * accex, _iq * accey, _iq * accez)
 {
     int16_t x,y,z;
     LIS2DH_Get(&x,&y,&z);
@@ -106,10 +106,11 @@ void GetAcce(uint32_t i, _iq * accex, _iq * accey)
     // 实测校准：两轴符号与初版推导均相反，最终映射 (xp,yp) = (+x,-y)
     float xp = (float) x * 0.3f;
     float yp = (float) y * -0.3f;
+    float zp = (float) z * 0.3f;
 
     *accex = _IQ(xp);
     *accey = _IQ(yp);
-
+    *accez = _IQ(zp);
 }
 
 
@@ -160,8 +161,9 @@ int main(void)
     uint32_t time = SysTick->CNT;
     _iq accex = _IQ(0);
     _iq accey = _IQ(9.8f);
+    _iq accez = _IQ(0);
     for (int i=0;i<5;i++){
-        GetAcce(7000,&accex,&accey);
+        GetAcce(7000,&accex,&accey,&accez);
         ParticleIntegrate(accex, accey);
         PushParticlesApart(PUSH_ITER);
         particles_to_grid();
@@ -185,11 +187,34 @@ int main(void)
     uint8_t display_off = 0;
     const _iq motion_threshold = _IQ(0.8f);   // 姿态变化判定阈值(m/s^2)
     const uint16_t stillness_timeout_frames = 1364U; // 15秒对应的帧数
+
+    // 摇晃换容器：持续剧烈摇晃约1秒在矩形/心形之间切换，再摇一次恢复
+    uint8_t heart_mode = 0;
+    uint16_t shake_frames = 0;
+    uint16_t shake_hold = 0;
+    uint8_t shake_rearm = 0;
+    const _iq shake_high2 = _IQ(0.74f);   // (13.8/16)^2，合加速度 > 1.4g
+    const _iq shake_low2 = _IQ(0.034f);   // (2.9/16)^2，合加速度 < 0.3g（甩动/失重）
     while(1)
     {   
         NVIC_DisableIRQ(TIM1_CC_IRQn);
         NVIC_DisableIRQ(TIM1_UP_IRQn);
-        GetAcce(7000,&accex,&accey);
+        GetAcce(7000,&accex,&accey,&accez);
+
+        // 剧烈摇晃判定：合加速度模长明显偏离1g（各轴先缩1/16再平方，避免Q24溢出）
+        _iq axs = _IQmpy(accex, _IQ(0.0625f));
+        _iq ays = _IQmpy(accey, _IQ(0.0625f));
+        _iq azs = _IQmpy(accez, _IQ(0.0625f));
+        _iq mag2 = _IQmpy(axs, axs) + _IQmpy(ays, ays) + _IQmpy(azs, azs);
+        uint8_t impulse = (mag2 > shake_high2 || mag2 < shake_low2) ? 1U : 0U;
+
+        // 单次冲击后保持约0.2秒的“摇晃中”状态，避免帧间隔错过峰值导致计分被扣光
+        if (impulse) {
+            shake_hold = 18U;
+        } else if (shake_hold > 0U) {
+            shake_hold--;
+        }
+        uint8_t shaking = (shake_hold > 0U) ? 1U : 0U;
 
         // 节电：检测姿态是否变化
         _iq dx = accex - last_accex;
@@ -205,6 +230,28 @@ int main(void)
         }
         last_accex = accex;
         last_accey = accey;
+
+        // 摇晃计时：持续剧烈摇晃累计约1秒触发切换；平静时缓慢回落
+        if (shake_rearm > 0U) {
+            shake_frames = 0;
+            if (!shaking) {
+                shake_rearm--;   // 切换后需平静约0.3秒，避免连续翻转
+            }
+        } else if (shaking) {
+            shake_frames += 1U;
+            if (shake_frames >= 80U) {
+                heart_mode ^= 1U;
+                SandSim_SetWallMode(heart_mode ? WALL_HEART : WALL_RECT);
+                shake_frames = 0;
+                shake_rearm = 30U;
+                if (display_off) {
+                    LED_Show();
+                    display_off = 0;
+                }
+            }
+        } else if (shake_frames > 0U) {
+            shake_frames--;
+        }
 
         // 静止超过15秒则关闭显示
         if (!display_off) {
