@@ -188,8 +188,8 @@ int main(void)
     const _iq motion_threshold = _IQ(0.8f);   // 姿态变化判定阈值(m/s^2)
     const uint16_t stillness_timeout_frames = 1364U; // 15秒对应的帧数
 
-    // 摇晃换容器：持续剧烈摇晃约1秒在矩形/心形之间切换，再摇一次恢复
-    uint8_t heart_mode = 0;
+    // 摇晃换容器：持续剧烈摇晃约1秒，按 矩形 -> 心形 -> 沙漏 -> 矩形 顺序切换
+    uint8_t wall_mode = WALL_RECT;
     uint16_t shake_frames = 0;
     uint16_t shake_hold = 0;
     uint8_t shake_rearm = 0;
@@ -240,8 +240,11 @@ int main(void)
         } else if (shaking) {
             shake_frames += 1U;
             if (shake_frames >= 80U) {
-                heart_mode ^= 1U;
-                SandSim_SetWallMode(heart_mode ? WALL_HEART : WALL_RECT);
+                wall_mode++;
+                if (wall_mode > WALL_HOURGLASS) {
+                    wall_mode = WALL_RECT;
+                }
+                SandSim_SetWallMode(wall_mode);
                 shake_frames = 0;
                 shake_rearm = 30U;
                 if (display_off) {

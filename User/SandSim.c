@@ -36,7 +36,23 @@ static const uint16_t heartWall[16] = {
     0x4001, 0x6003, 0x3006, 0x180C, 0x0C18, 0x0630, 0x0360, 0x01C0
 };
 
+// 沙漏内部区域：上下两个漏斗形腔体，中间 y=8/9 行仅 x=8 一格为颈部通道
+static const uint16_t hourglassInterior[16] = {
+    0x0000, 0x1FFC, 0x0FF8, 0x07F0, 0x03E0, 0x01C0, 0x01C0, 0x0080,
+    0x0080, 0x01C0, 0x01C0, 0x03E0, 0x07F0, 0x0FF8, 0x1FFC, 0x0000
+};
+
+// 沙漏墙壁（轮廓），用于点亮外形
+static const uint16_t hourglassWall[16] = {
+    0x3FFE, 0x2002, 0x1004, 0x0808, 0x0410, 0x0220, 0x0220, 0x0140,
+    0x0140, 0x0220, 0x0220, 0x0410, 0x0808, 0x1004, 0x2002, 0x3FFE
+};
+
 static uint8_t wallMode = WALL_RECT;
+
+// 当前形状掩码，为0表示矩形（全部内部、无轮廓墙）
+static const uint16_t *shapeInterior = 0;
+static const uint16_t *shapeWall = 0;
 
 static _iq minX = Spacing + ParticleRadius;
 static _iq minY = Spacing + ParticleRadius;
@@ -59,22 +75,22 @@ static uint8_t is_fluid_cell(unsigned int x, unsigned int y)
     if (x < 1U || x > CellNumX - 2U || y < 1U || y > CellNumY - 2U) {
         return 0U;
     }
-    if (wallMode == WALL_HEART) {
-        return (uint8_t)((heartInterior[y - 1U] >> (15U - x)) & 1U);
+    if (shapeInterior == 0) {
+        return 1U;
     }
-    return 1U;
+    return (uint8_t)((shapeInterior[y - 1U] >> (15U - x)) & 1U);
 }
 
-// 该网格是否是需要点亮的墙壁（心形蓝色轮廓）
+// 该网格是否是需要点亮的墙壁（形状轮廓）
 static uint8_t is_visible_wall(unsigned int x, unsigned int y)
 {
-    if (wallMode != WALL_HEART) {
+    if (shapeWall == 0) {
         return 0U;
     }
     if (x < 1U || x > CellNumX - 2U || y < 1U || y > CellNumY - 2U) {
         return 0U;
     }
-    return (uint8_t)((heartWall[y - 1U] >> (15U - x)) & 1U);
+    return (uint8_t)((shapeWall[y - 1U] >> (15U - x)) & 1U);
 }
 
 static int clamp_index(int value, int min_value, int max_value) {
@@ -137,9 +153,11 @@ void InitParticles() {
     const _iq jitter = _IQmpy(Spacing, _IQ(0.3));
     unsigned int p_num = 0;
 
-    // 自下而上逐格布置，保证静止时流体堆在容器底部
+    // 矩形/心形自下而上逐格布置，保证静止时流体堆在容器底部；
+    // 沙漏自上而下布置，让沙子先聚在上腔，切换后能看到向下漏沙
     for (unsigned int pass = 0; pass < 2U && p_num < activeParticles; pass++) {
-        for (int y = (int)CellNumY - 2; y >= 1 && p_num < activeParticles; y--) {
+        for (unsigned int row = 0; row <= CellNumY - 3U && p_num < activeParticles; row++) {
+            int y = (wallMode == WALL_HOURGLASS) ? (int)row + 1 : (int)(CellNumY - 2U - row);
             for (int x = 1; x <= (int)CellNumX - 2 && p_num < activeParticles; x++) {
                 if (!is_fluid_cell((unsigned int)x, (unsigned int)y)) {
                     continue;
@@ -163,12 +181,31 @@ void InitParticles() {
 
 void SandSim_SetWallMode(uint8_t mode)
 {
-    if ((mode == WALL_HEART) == (wallMode == WALL_HEART)) {
+    if (mode == wallMode) {
         return;
     }
-    wallMode = (mode == WALL_HEART) ? WALL_HEART : WALL_RECT;
-    // 心形容积约为矩形的一半，减少粒子数以留出可见液面
-    activeParticles = (wallMode == WALL_HEART) ? 64U : NumberOfParticles;
+    wallMode = mode;
+
+    switch (wallMode) {
+    case WALL_HEART:
+        shapeInterior = heartInterior;
+        shapeWall = heartWall;
+        // 心形容积约为矩形的一半，减少粒子数以留出可见液面
+        activeParticles = 64U;
+        break;
+    case WALL_HOURGLASS:
+        shapeInterior = hourglassInterior;
+        shapeWall = hourglassWall;
+        // 上腔38格，用36个粒子装满上腔，漏完后正好铺满下腔
+        activeParticles = 36U;
+        break;
+    default:
+        shapeInterior = 0;
+        shapeWall = 0;
+        activeParticles = NumberOfParticles;
+        break;
+    }
+
     // 容器改变后重新布置粒子，避免粒子被留在新墙壁内部
     InitParticles();
 }
