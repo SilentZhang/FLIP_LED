@@ -51,13 +51,17 @@ static const uint16_t hourglassWall[16] = {
 static uint8_t wallMode = WALL_RECT;
 
 // ---- 磁流体模式参数 ----
-#define FERRO_PARTICLES  56U           // 磁流体粒子数（约5x5灯格的一团）
+#define FERRO_PARTICLES  76U           // 磁流体粒子数（约5x5灯格的一团）
 #define FERRO_CYCLE      120U          // 一个“聚合-冲撞-爆散”周期的帧数(约1.3秒)
-#define FERRO_MERGE      _IQ(20.0f)    // 向质心收拢的弹性系数(1/s^2)
-#define FERRO_STIR       _IQ(8.0f)     // 绕质心搅动的加速度(1/s^2)
-#define FERRO_DRIVE      _IQ(5.0f)     // 冲向墙壁的整体加速度(m/s^2)
-#define FERRO_DAMP       _IQ(0.96f)    // 每帧速度阻尼
-#define FERRO_BURST      _IQ(1.8f)     // 撞墙爆散瞬间的喷射速度(m/s)
+#define FERRO_MERGE      _IQ(5.0f)    // 向质心收拢的弹性系数(1/s^2)
+#define FERRO_STIR       _IQ(4.0f)     // 绕质心搅动的加速度(1/s^2)
+#define FERRO_DRIVE      _IQ(2.0f)     // 冲向墙壁的整体加速度(m/s^2)
+#define FERRO_DAMP       _IQ(0.75f)    // 每帧速度阻尼（粘度越大值越小）
+#define FERRO_BURST      _IQ(2.4f)     // 撞墙爆散瞬间的喷射速度(m/s)
+#define FERRO_GRAVITY    _IQ(0.45f)    // 重力系数，0.3g，倾斜设备时磁流体会往低处淌
+#define FERRO_BOUNCE     _IQ(-0.05f)   // 撞墙回弹系数，取小值让液体贴墙摊开而不是弹开
+#define FERRO_FRICTION   _IQ(0.80f)    // 撞墙时切向速度的保留比例
+#define FERRO_VISC       _IQ(0.07f)    // 相邻粒子的速度耦合系数（粘性）
 
 static uint8_t ferroActive = 0;
 static uint16_t ferroFrame = 0;
@@ -295,9 +299,11 @@ static void ConstrainParticlesToFluid(void)
 
 // 磁流体：整团粒子被“磁力”收拢成球，随后被推向一面墙，撞墙瞬间爆散成几块，
 // 再靠收拢力重新融合，如此循环。此模式不参与网格压力求解，纯粒子运动。
-static void FerroIntegrate(void)
+static void FerroIntegrate(_iq xAcceleration, _iq yAcceleration)
 {
     const _iq count = _IQ((float)activeParticles);
+    _iq gx = _IQmpy(FERRO_GRAVITY, xAcceleration);
+    _iq gy = _IQmpy(FERRO_GRAVITY, yAcceleration);
     _iq cx = _IQ(0.0);
     _iq cy = _IQ(0.0);
     for (unsigned int i = 0; i < activeParticles; i++) {
@@ -357,9 +363,9 @@ static void FerroIntegrate(void)
         _iq dx = cx - px;
         _iq dy = cy - py;
 
-        // 收拢力(指向质心) + 搅动力(绕质心旋转) + 冲撞驱动
-        _iq ax = _IQmpy(FERRO_MERGE, dx) - _IQmpy(FERRO_STIR, dy) + drvX;
-        _iq ay = _IQmpy(FERRO_MERGE, dy) + _IQmpy(FERRO_STIR, dx) + drvY;
+        // 收拢力(指向质心) + 搅动力(绕质心旋转) + 冲撞驱动 + 重力
+        _iq ax = _IQmpy(FERRO_MERGE, dx) - _IQmpy(FERRO_STIR, dy) + drvX + gx;
+        _iq ay = _IQmpy(FERRO_MERGE, dy) + _IQmpy(FERRO_STIR, dx) + drvY + gy;
 
         _iq vx = particleVel[XID(i)] + _IQmpy(ax, dt);
         _iq vy = particleVel[YID(i)] + _IQmpy(ay, dt);
@@ -369,21 +375,26 @@ static void FerroIntegrate(void)
         px += _IQmpy(vx, dt);
         py += _IQmpy(vy, dt);
 
+        // 撞墙：法向几乎不回弹，切向速度衰减，液体像粘在墙上摊开
         if (px < minX) {
             px = minX;
-            vx = _IQmpy(vx, BOUNCYNESS);
+            vx = _IQmpy(vx, FERRO_BOUNCE);
+            vy = _IQmpy(vy, FERRO_FRICTION);
         }
         if (px > maxX) {
             px = maxX;
-            vx = _IQmpy(vx, BOUNCYNESS);
+            vx = _IQmpy(vx, FERRO_BOUNCE);
+            vy = _IQmpy(vy, FERRO_FRICTION);
         }
         if (py < minY) {
             py = minY;
-            vy = _IQmpy(vy, BOUNCYNESS);
+            vy = _IQmpy(vy, FERRO_BOUNCE);
+            vx = _IQmpy(vx, FERRO_FRICTION);
         }
         if (py > maxY) {
             py = maxY;
-            vy = _IQmpy(vy, BOUNCYNESS);
+            vy = _IQmpy(vy, FERRO_BOUNCE);
+            vx = _IQmpy(vx, FERRO_FRICTION);
         }
 
         particlePos[XID(i)] = px;
@@ -396,7 +407,8 @@ static void FerroIntegrate(void)
 void ParticleIntegrate(_iq xAcceleration, _iq yAcceleration) {
 
     if (ferroActive) {
-        FerroIntegrate();   // 磁流体模式自带驱动力，不跟随设备姿态
+        // 磁流体模式：重力跟随设备姿态，另有磁吸/搅拌/冲撞驱动力
+        FerroIntegrate(xAcceleration, yAcceleration);
         return;
     }
 
@@ -502,30 +514,43 @@ void PushParticlesApart(unsigned int nIters) {
                         particlePos[YID(i)] -= dy;
                         particlePos[XID(id)] += dx;
                         particlePos[YID(id)] += dy;
+
+                        if (ferroActive) {
+                            // 粘性：接触的粒子互相拖拽速度，液体才会拉丝、缓慢摊开
+                            _iq dvx = particleVel[XID(id)] - particleVel[XID(i)];
+                            _iq dvy = particleVel[YID(id)] - particleVel[YID(i)];
+                            particleVel[XID(i)] += _IQmpy(FERRO_VISC, dvx);
+                            particleVel[YID(i)] += _IQmpy(FERRO_VISC, dvy);
+                            particleVel[XID(id)] -= _IQmpy(FERRO_VISC, dvx);
+                            particleVel[YID(id)] -= _IQmpy(FERRO_VISC, dvy);
+                        }
                     }
                 }
             }
         }
     }
+    // 磁流体撞墙几乎不弹，靠粘性贴住墙面摊开
+    const _iq wallBounce = ferroActive ? FERRO_BOUNCE : BOUNCYNESS;
+
     for (unsigned int i = 0; i < activeParticles; i++) {
         _iq x = particlePos[XID(i)];
         _iq y = particlePos[YID(i)];
 
         if (x < minX) {
             x = minX;
-            particleVel[XID(i)] = _IQmpy(particleVel[XID(i)], BOUNCYNESS);
+            particleVel[XID(i)] = _IQmpy(particleVel[XID(i)], wallBounce);
         }
         if (x > maxX) {
             x = maxX;
-            particleVel[XID(i)] = _IQmpy(particleVel[XID(i)], BOUNCYNESS);
+            particleVel[XID(i)] = _IQmpy(particleVel[XID(i)], wallBounce);
         }
         if (y < minY) {
             y = minY;
-            particleVel[YID(i)] = _IQmpy(particleVel[YID(i)] ,BOUNCYNESS);
+            particleVel[YID(i)] = _IQmpy(particleVel[YID(i)] ,wallBounce);
         }
         if (y > maxY) {
             y = maxY;
-            particleVel[YID(i)] = _IQmpy(particleVel[YID(i)] ,BOUNCYNESS);
+            particleVel[YID(i)] = _IQmpy(particleVel[YID(i)] ,wallBounce);
         }
 
         particlePos[XID(i)] = x;
