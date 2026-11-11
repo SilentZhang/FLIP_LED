@@ -50,6 +50,19 @@ static const uint16_t hourglassWall[16] = {
 
 static uint8_t wallMode = WALL_RECT;
 
+// ---- 磁流体模式参数 ----
+#define FERRO_PARTICLES  56U           // 磁流体粒子数（约5x5灯格的一团）
+#define FERRO_CYCLE      120U          // 一个“聚合-冲撞-爆散”周期的帧数(约1.3秒)
+#define FERRO_MERGE      _IQ(20.0f)    // 向质心收拢的弹性系数(1/s^2)
+#define FERRO_STIR       _IQ(8.0f)     // 绕质心搅动的加速度(1/s^2)
+#define FERRO_DRIVE      _IQ(5.0f)     // 冲向墙壁的整体加速度(m/s^2)
+#define FERRO_DAMP       _IQ(0.96f)    // 每帧速度阻尼
+#define FERRO_BURST      _IQ(1.8f)     // 撞墙爆散瞬间的喷射速度(m/s)
+
+static uint8_t ferroActive = 0;
+static uint16_t ferroFrame = 0;
+static uint8_t ferroDir = 0;
+
 // 当前形状掩码，为0表示矩形（全部内部、无轮廓墙）
 static const uint16_t *shapeInterior = 0;
 static const uint16_t *shapeWall = 0;
@@ -155,7 +168,21 @@ void InitParticles() {
 
     // 矩形/心形自下而上逐格布置，保证静止时流体堆在容器底部；
     // 沙漏自上而下布置，让沙子先聚在上腔，切换后能看到向下漏沙
-    for (unsigned int pass = 0; pass < 2U && p_num < activeParticles; pass++) {
+    if (ferroActive) {
+        // 磁流体：在画面中央摆成一团，随后靠聚合力收成球状
+        for (unsigned int i = 0; i < activeParticles; i++) {
+            int x = 4 + (int)(i % 8U);
+            int y = 6 + (int)(i / 8U);
+            _iq px = _IQmpy(_IQ(x) + half, h);
+            _iq py = _IQmpy(_IQ(y) + half, h);
+            _iq ox = _IQmpy(jitter, _IQmpy(_IQ(2.0), rand_unit()) - _IQ(1.0));
+            _iq oy = _IQmpy(jitter, _IQmpy(_IQ(2.0), rand_unit()) - _IQ(1.0));
+            particlePos[XID(i)] = px + ox;
+            particlePos[YID(i)] = py + oy;
+            p_num++;
+        }
+    }
+    else for (unsigned int pass = 0; pass < 2U && p_num < activeParticles; pass++) {
         for (unsigned int row = 0; row <= CellNumY - 3U && p_num < activeParticles; row++) {
             int y = (wallMode == WALL_HOURGLASS) ? (int)row + 1 : (int)(CellNumY - 2U - row);
             for (int x = 1; x <= (int)CellNumX - 2 && p_num < activeParticles; x++) {
@@ -185,6 +212,7 @@ void SandSim_SetWallMode(uint8_t mode)
         return;
     }
     wallMode = mode;
+    ferroActive = 0;
 
     switch (wallMode) {
     case WALL_HEART:
@@ -198,6 +226,15 @@ void SandSim_SetWallMode(uint8_t mode)
         shapeWall = hourglassWall;
         // 上腔38格，用36个粒子装满上腔，漏完后正好铺满下腔
         activeParticles = 36U;
+        break;
+    case WALL_FERRO:
+        // 磁流体使用四周矩形墙壁，不点亮轮廓，只显示那团液体
+        shapeInterior = 0;
+        shapeWall = 0;
+        activeParticles = FERRO_PARTICLES;
+        ferroActive = 1;
+        ferroFrame = 0;
+        ferroDir = 3U;    // 第一个周期先朝下撞
         break;
     default:
         shapeInterior = 0;
@@ -256,7 +293,112 @@ static void ConstrainParticlesToFluid(void)
     }
 }
 
+// 磁流体：整团粒子被“磁力”收拢成球，随后被推向一面墙，撞墙瞬间爆散成几块，
+// 再靠收拢力重新融合，如此循环。此模式不参与网格压力求解，纯粒子运动。
+static void FerroIntegrate(void)
+{
+    const _iq count = _IQ((float)activeParticles);
+    _iq cx = _IQ(0.0);
+    _iq cy = _IQ(0.0);
+    for (unsigned int i = 0; i < activeParticles; i++) {
+        cx += particlePos[XID(i)];
+        cy += particlePos[YID(i)];
+    }
+    cx = _IQdiv(cx, count);
+    cy = _IQdiv(cy, count);
+
+    uint16_t phase = ferroFrame % FERRO_CYCLE;
+    if (phase == 0U) {
+        ferroDir = (uint8_t)((ferroDir + 1U) & 3U);   // 每个周期换一面墙
+    }
+    ferroFrame++;
+
+    // 冲撞阶段：整团朝目标墙加速
+    _iq drvX = _IQ(0.0);
+    _iq drvY = _IQ(0.0);
+    if (phase >= FERRO_CYCLE / 2U && phase < FERRO_CYCLE - 20U) {
+        switch (ferroDir) {
+        case 0U: drvX = -FERRO_DRIVE; break;
+        case 1U: drvY = -FERRO_DRIVE; break;
+        case 2U: drvX =  FERRO_DRIVE; break;
+        default: drvY =  FERRO_DRIVE; break;
+        }
+    }
+
+    // 撞墙瞬间：沿半径向外喷射并叠加随机扰动，让一团分裂成几块
+    if (phase == FERRO_CYCLE - 20U) {
+        for (unsigned int i = 0; i < activeParticles; i++) {
+            _iq dx = particlePos[XID(i)] - cx;
+            _iq dy = particlePos[YID(i)] - cy;
+            _iq d = _IQsqrt(_IQmpy(dx, dx) + _IQmpy(dy, dy));
+            _iq ux;
+            _iq uy;
+            if (d > _IQ(0.001f)) {
+                ux = _IQdiv(dx, d);
+                uy = _IQdiv(dy, d);
+            } else {
+                ux = _IQmpy(_IQ(2.0f), rand_unit()) - _IQ(1.0f);
+                uy = _IQmpy(_IQ(2.0f), rand_unit()) - _IQ(1.0f);
+            }
+            // 随机切向分量 = 径向向量旋转90度
+            _iq tx = -uy;
+            _iq ty =  ux;
+            _iq k = _IQmpy(_IQ(2.0f), rand_unit()) - _IQ(1.0f);
+            _iq vx = _IQmpy(FERRO_BURST, ux + _IQmpy(_IQ(0.8f), _IQmpy(k, tx)));
+            _iq vy = _IQmpy(FERRO_BURST, uy + _IQmpy(_IQ(0.8f), _IQmpy(k, ty)));
+            particleVel[XID(i)] += vx;
+            particleVel[YID(i)] += vy;
+        }
+    }
+
+    for (unsigned int i = 0; i < activeParticles; i++) {
+        _iq px = particlePos[XID(i)];
+        _iq py = particlePos[YID(i)];
+        _iq dx = cx - px;
+        _iq dy = cy - py;
+
+        // 收拢力(指向质心) + 搅动力(绕质心旋转) + 冲撞驱动
+        _iq ax = _IQmpy(FERRO_MERGE, dx) - _IQmpy(FERRO_STIR, dy) + drvX;
+        _iq ay = _IQmpy(FERRO_MERGE, dy) + _IQmpy(FERRO_STIR, dx) + drvY;
+
+        _iq vx = particleVel[XID(i)] + _IQmpy(ax, dt);
+        _iq vy = particleVel[YID(i)] + _IQmpy(ay, dt);
+        vx = _IQmpy(vx, FERRO_DAMP);
+        vy = _IQmpy(vy, FERRO_DAMP);
+
+        px += _IQmpy(vx, dt);
+        py += _IQmpy(vy, dt);
+
+        if (px < minX) {
+            px = minX;
+            vx = _IQmpy(vx, BOUNCYNESS);
+        }
+        if (px > maxX) {
+            px = maxX;
+            vx = _IQmpy(vx, BOUNCYNESS);
+        }
+        if (py < minY) {
+            py = minY;
+            vy = _IQmpy(vy, BOUNCYNESS);
+        }
+        if (py > maxY) {
+            py = maxY;
+            vy = _IQmpy(vy, BOUNCYNESS);
+        }
+
+        particlePos[XID(i)] = px;
+        particlePos[YID(i)] = py;
+        particleVel[XID(i)] = vx;
+        particleVel[YID(i)] = vy;
+    }
+}
+
 void ParticleIntegrate(_iq xAcceleration, _iq yAcceleration) {
+
+    if (ferroActive) {
+        FerroIntegrate();   // 磁流体模式自带驱动力，不跟随设备姿态
+        return;
+    }
 
 
     for (unsigned int i = 0; i < activeParticles; i++) {

@@ -35,8 +35,9 @@ void screen_update(void);
 void InitParticles(void);//初始化粒子，还没完成
 void visualize_grid(void); //显示
 
-//流体容器形状：0=默认矩形，1=心形，2=沙漏
+//流体容器形状：0=默认矩形，1=心形，2=沙漏，3=磁流体
 #define WALL_RECT      0U
 #define WALL_HEART     1U
 #define WALL_HOURGLASS 2U
+#define WALL_FERRO     3U
 void SandSim_SetWallMode(uint8_t mode);

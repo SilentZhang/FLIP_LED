@@ -241,7 +241,7 @@ int main(void)
             shake_frames += 1U;
             if (shake_frames >= 80U) {
                 wall_mode++;
-                if (wall_mode > WALL_HOURGLASS) {
+                if (wall_mode > WALL_FERRO) {
                     wall_mode = WALL_RECT;
                 }
                 SandSim_SetWallMode(wall_mode);
@@ -271,9 +271,12 @@ int main(void)
             ParticleIntegrate(accex, accey);
             PushParticlesApart(PUSH_ITER);
             particles_to_grid();
-            density_update();
-            compute_grid_forces(GRID_ITER);
-            grid_to_particles();
+            // 磁流体是纯粒子运动，不需要网格压力求解
+            if (wall_mode != WALL_FERRO) {
+                density_update();
+                compute_grid_forces(GRID_ITER);
+                grid_to_particles();
+            }
             Show();
         }
         NVIC_EnableIRQ(TIM1_CC_IRQn);
